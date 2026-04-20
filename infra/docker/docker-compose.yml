@@ -1,0 +1,244 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Event-Driven Delivery Platform — Local Infrastructure
+#
+# Starts:
+#   - Kafka (KRaft mode, no Zookeeper)
+#   - PostgreSQL instances (one per service)
+#   - Redis
+#   - OpenTelemetry Collector
+#   - Jaeger (traces UI)
+#   - Prometheus (metrics)
+#   - Grafana (dashboards)
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  delivery-net:
+    driver: bridge
+
+volumes:
+  order-db-data:
+  payment-db-data:
+  dispatch-db-data:
+  notification-db-data:
+  auth-db-data:
+  customer-db-data:
+  restaurant-db-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  # ── Kafka (KRaft — no Zookeeper required) ──────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"       # external (host → container)
+      - "9093:9093"       # controller
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: "delivery-platform-local"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - delivery-net
+
+  # ── PostgreSQL — one instance per service (database-per-service pattern) ───
+  order-db:
+    image: postgres:16-alpine
+    container_name: order-db
+    environment:
+      POSTGRES_DB: order_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d order_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - delivery-net
+
+  payment-db:
+    image: postgres:16-alpine
+    container_name: payment-db
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  dispatch-db:
+    image: postgres:16-alpine
+    container_name: dispatch-db
+    environment:
+      POSTGRES_DB: dispatch_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5434:5432"
+    volumes:
+      - dispatch-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  notification-db:
+    image: postgres:16-alpine
+    container_name: notification-db
+    environment:
+      POSTGRES_DB: notification_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5435:5432"
+    volumes:
+      - notification-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  auth-db:
+    image: postgres:16-alpine
+    container_name: auth-db
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5436:5432"
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  customer-db:
+    image: postgres:16-alpine
+    container_name: customer-db
+    environment:
+      POSTGRES_DB: customer_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5437:5432"
+    volumes:
+      - customer-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  restaurant-db:
+    image: postgres:16-alpine
+    container_name: restaurant-db
+    environment:
+      POSTGRES_DB: restaurant_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    ports:
+      - "5438:5432"
+    volumes:
+      - restaurant-db-data:/var/lib/postgresql/data
+    networks:
+      - delivery-net
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - delivery-net
+
+  # ── OpenTelemetry Collector ────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+      - "8888:8888"     # Collector metrics (Prometheus scrape)
+    depends_on:
+      - jaeger
+      - prometheus
+    networks:
+      - delivery-net
+
+  # ── Jaeger (distributed trace UI) ─────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14250:14250"   # gRPC model.proto
+    networks:
+      - delivery-net
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - delivery-net
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - delivery-net
