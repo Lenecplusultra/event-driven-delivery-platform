@@ -15,7 +15,7 @@ class PaymentServiceSettings(BaseServiceSettings):
 
     # PostgreSQL
     database_url: str = (
-        "postgresql+asyncpg://delivery:delivery_secret@localhost:5433/payment_db"
+        "postgresql+asyncpg://delivery:delivery_secret@payment-db:5432/payment_db"
     )
 
     # Topics this service publishes to

@@ -15,7 +15,7 @@ class RestaurantServiceSettings(BaseServiceSettings):
 
     # PostgreSQL
     database_url: str = (
-        "postgresql+asyncpg://delivery:delivery_secret@localhost:5438/restaurant_db"
+        "postgresql+asyncpg://delivery:delivery_secret@restaurant-db:5432/restaurant_db"
     )
 
     # Redis TTLs (seconds)

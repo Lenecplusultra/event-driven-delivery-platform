@@ -3,14 +3,15 @@ version: "3.9"
 # ─────────────────────────────────────────────────────────────────────────────
 # Event-Driven Delivery Platform — Local Infrastructure
 #
-# Starts:
-#   - Kafka (KRaft mode, no Zookeeper)
-#   - PostgreSQL instances (one per service)
-#   - Redis
-#   - OpenTelemetry Collector
-#   - Jaeger (traces UI)
-#   - Prometheus (metrics)
-#   - Grafana (dashboards)
+# Port exposure philosophy (matches SPEC.md database-per-service principle):
+#   EXPOSED to host  — tools you open in a browser or CLI from your laptop:
+#                      Kafka, Redis, Jaeger, Prometheus, Grafana, OTel
+#   NOT exposed      — all Postgres instances. Services reach them by
+#                      container name over delivery-net (e.g. order-db:5432).
+#                      Zero host port conflicts possible.
+#
+# To inspect a DB directly without exposing it:
+#   docker exec -it order-db psql -U delivery -d order_db
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -37,14 +38,14 @@ services:
     container_name: kafka
     hostname: kafka
     ports:
-      - "9092:9092"       # external (host → container)
-      - "9093:9093"       # controller
+      - "9092:9092"       # Exposed: needed to run services from host (step 3)
+      - "9093:9093"       # Controller port (internal KRaft quorum)
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
@@ -62,7 +63,11 @@ services:
     networks:
       - delivery-net
 
-  # ── PostgreSQL — one instance per service (database-per-service pattern) ───
+  # ── PostgreSQL — one per service, NO host ports ────────────────────────────
+  # Services connect using the container name as hostname, e.g.:
+  #   postgresql+asyncpg://delivery:delivery_secret@order-db:5432/order_db
+  # To inspect manually: docker exec -it order-db psql -U delivery -d order_db
+
   order-db:
     image: postgres:16-alpine
     container_name: order-db
@@ -70,8 +75,6 @@ services:
       POSTGRES_DB: order_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5432:5432"
     volumes:
       - order-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -89,10 +92,13 @@ services:
       POSTGRES_DB: payment_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5433:5432"
     volumes:
       - payment-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d payment_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - delivery-net
 
@@ -103,10 +109,13 @@ services:
       POSTGRES_DB: dispatch_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5434:5432"
     volumes:
       - dispatch-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d dispatch_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - delivery-net
 
@@ -117,10 +126,13 @@ services:
       POSTGRES_DB: notification_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5435:5432"
     volumes:
       - notification-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d notification_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - delivery-net
 
@@ -131,8 +143,6 @@ services:
       POSTGRES_DB: auth_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5436:5432"
     volumes:
       - auth-db-data:/var/lib/postgresql/data
     networks:
@@ -145,8 +155,6 @@ services:
       POSTGRES_DB: customer_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5437:5432"
     volumes:
       - customer-db-data:/var/lib/postgresql/data
     networks:
@@ -159,10 +167,13 @@ services:
       POSTGRES_DB: restaurant_db
       POSTGRES_USER: delivery
       POSTGRES_PASSWORD: delivery_secret
-    ports:
-      - "5438:5432"
     volumes:
       - restaurant-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d restaurant_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - delivery-net
 
@@ -172,7 +183,7 @@ services:
     container_name: redis
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"
+      - "6379:6379"       # Exposed: useful to inspect cache from host
     volumes:
       - redis-data:/data
     healthcheck:
@@ -191,24 +202,24 @@ services:
     volumes:
       - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml:ro
     ports:
-      - "4317:4317"     # OTLP gRPC
-      - "4318:4318"     # OTLP HTTP
-      - "8888:8888"     # Collector metrics (Prometheus scrape)
+      - "4317:4317"     # Exposed: services on host send traces here (OTLP gRPC)
+      - "4318:4318"     # Exposed: OTLP HTTP alternative
+      - "8888:8888"     # Exposed: collector self-metrics for Prometheus
     depends_on:
       - jaeger
       - prometheus
     networks:
       - delivery-net
 
-  # ── Jaeger (distributed trace UI) ─────────────────────────────────────────
+  # ── Jaeger ─────────────────────────────────────────────────────────────────
   jaeger:
     image: jaegertracing/all-in-one:1.60
     container_name: jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"   # Jaeger UI
-      - "14250:14250"   # gRPC model.proto
+      - "16686:16686"   # Exposed: Jaeger UI → http://localhost:16686
+      - "14250:14250"   # Exposed: gRPC intake from OTel collector
     networks:
       - delivery-net
 
@@ -223,7 +234,7 @@ services:
       - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"
+      - "9090:9090"     # Exposed: Prometheus UI → http://localhost:9090
     networks:
       - delivery-net
 
@@ -237,7 +248,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "3000:3000"     # Exposed: Grafana UI → http://localhost:3000
     depends_on:
       - prometheus
     networks:

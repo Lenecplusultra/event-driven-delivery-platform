@@ -15,7 +15,7 @@ class OrderServiceSettings(BaseServiceSettings):
     kafka_consumer_group_id: str = "order-service-group"
 
     # PostgreSQL
-    database_url: str = "postgresql+asyncpg://delivery:delivery_secret@localhost:5432/order_db"
+    database_url: str = "postgresql+asyncpg://delivery:delivery_secret@order-db:5432/order_db"
 
     # Topics this service publishes to
     topic_order_created: str = "order.created"
