@@ -1,16 +1,21 @@
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Event-Driven Delivery Platform — Local Infrastructure
+# Event-Driven Delivery Platform — Full Local Stack
 #
-# Port exposure philosophy (matches SPEC.md database-per-service principle):
-#   EXPOSED to host  — tools you open in a browser or CLI from your laptop:
-#                      Kafka, Redis, Jaeger, Prometheus, Grafana, OTel
-#   NOT exposed      — all Postgres instances. Services reach them by
-#                      container name over delivery-net (e.g. order-db:5432).
-#                      Zero host port conflicts possible.
+# Run from the repo root:
+#   docker compose -f infra/docker/docker-compose.yml up --build
 #
-# To inspect a DB directly without exposing it:
+# Build context for all services is the repo root so that libs/ is accessible.
+#
+# Port exposure:
+#   EXPOSED  — things you open from your browser/laptop:
+#              services (8001-8003), Kafka (9092), Redis (6379),
+#              Jaeger (16686), Prometheus (9090), Grafana (3000), OTel (4317)
+#   INTERNAL — all Postgres instances: services reach them by container name
+#              e.g. order-db:5432. No host ports, no conflicts.
+#
+# To inspect a database directly:
 #   docker exec -it order-db psql -U delivery -d order_db
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -30,25 +35,35 @@ volumes:
   prometheus-data:
   grafana-data:
 
+# ── Shared env anchors ────────────────────────────────────────────────────────
+# These are referenced in each service block with <<: *common-env
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  REDIS_URL: redis://redis:6379/0
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_TRACES_ENABLED: "true"
+  ENVIRONMENT: local
+  LOG_LEVEL: INFO
+
 services:
 
-  # ── Kafka (KRaft — no Zookeeper required) ──────────────────────────────────
+  # ── Kafka (KRaft — no Zookeeper) ───────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.7.0
     container_name: kafka
     hostname: kafka
     ports:
-      - "9092:9092"       # Exposed: needed to run services from host (step 3)
-      - "9093:9093"       # Controller port (internal KRaft quorum)
+      - "9092:9092"     # Exposed for bootstrap-topics.sh and local debugging
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      # Two listeners: one for containers (INTERNAL), one for host (EXTERNAL)
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -59,14 +74,12 @@ services:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
       timeout: 10s
-      retries: 10
+      retries: 15
+      start_period: 20s
     networks:
       - delivery-net
 
-  # ── PostgreSQL — one per service, NO host ports ────────────────────────────
-  # Services connect using the container name as hostname, e.g.:
-  #   postgresql+asyncpg://delivery:delivery_secret@order-db:5432/order_db
-  # To inspect manually: docker exec -it order-db psql -U delivery -d order_db
+  # ── PostgreSQL — one per service, internal only ────────────────────────────
 
   order-db:
     image: postgres:16-alpine
@@ -96,6 +109,23 @@ services:
       - payment-db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U delivery -d payment_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - delivery-net
+
+  restaurant-db:
+    image: postgres:16-alpine
+    container_name: restaurant-db
+    environment:
+      POSTGRES_DB: restaurant_db
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery_secret
+    volumes:
+      - restaurant-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d restaurant_db"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -160,30 +190,13 @@ services:
     networks:
       - delivery-net
 
-  restaurant-db:
-    image: postgres:16-alpine
-    container_name: restaurant-db
-    environment:
-      POSTGRES_DB: restaurant_db
-      POSTGRES_USER: delivery
-      POSTGRES_PASSWORD: delivery_secret
-    volumes:
-      - restaurant-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U delivery -d restaurant_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks:
-      - delivery-net
-
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
     image: redis:7.4-alpine
     container_name: redis
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"       # Exposed: useful to inspect cache from host
+      - "6379:6379"     # Exposed for local inspection with redis-cli
     volumes:
       - redis-data:/data
     healthcheck:
@@ -194,7 +207,8 @@ services:
     networks:
       - delivery-net
 
-  # ── OpenTelemetry Collector ────────────────────────────────────────────────
+  # ── Observability ──────────────────────────────────────────────────────────
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.108.0
     container_name: otel-collector
@@ -202,28 +216,26 @@ services:
     volumes:
       - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml:ro
     ports:
-      - "4317:4317"     # Exposed: services on host send traces here (OTLP gRPC)
-      - "4318:4318"     # Exposed: OTLP HTTP alternative
-      - "8888:8888"     # Exposed: collector self-metrics for Prometheus
+      - "4317:4317"     # OTLP gRPC — services send traces here
+      - "4318:4318"     # OTLP HTTP
+      - "8888:8888"     # Collector self-metrics
     depends_on:
       - jaeger
       - prometheus
     networks:
       - delivery-net
 
-  # ── Jaeger ─────────────────────────────────────────────────────────────────
   jaeger:
     image: jaegertracing/all-in-one:1.60
     container_name: jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"   # Exposed: Jaeger UI → http://localhost:16686
-      - "14250:14250"   # Exposed: gRPC intake from OTel collector
+      - "16686:16686"   # Jaeger UI → http://localhost:16686
+      - "14250:14250"
     networks:
       - delivery-net
 
-  # ── Prometheus ─────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.54.0
     container_name: prometheus
@@ -234,11 +246,10 @@ services:
       - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"     # Exposed: Prometheus UI → http://localhost:9090
+      - "9090:9090"     # Prometheus UI → http://localhost:9090
     networks:
       - delivery-net
 
-  # ── Grafana ────────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:11.2.0
     container_name: grafana
@@ -248,8 +259,84 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"     # Exposed: Grafana UI → http://localhost:3000
+      - "3000:3000"     # Grafana UI → http://localhost:3000
     depends_on:
       - prometheus
+    networks:
+      - delivery-net
+
+  # ── Application Services ───────────────────────────────────────────────────
+  # Build context is ../../ (repo root) so libs/ is accessible to all builds.
+  # Each service waits for its DB and Kafka to be healthy before starting.
+
+  order-service:
+    build:
+      context: ../..
+      dockerfile: services/order-service/Dockerfile
+    container_name: order-service
+    ports:
+      - "8001:8001"     # Exposed: POST /v1/orders, GET /v1/orders/{id}
+    environment:
+      <<: *common-env
+      SERVICE_NAME: order-service
+      DATABASE_URL: postgresql+asyncpg://delivery:delivery_secret@order-db:5432/order_db
+      KAFKA_CONSUMER_GROUP_ID: order-service-group
+    depends_on:
+      order-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - delivery-net
+
+  restaurant-service:
+    build:
+      context: ../..
+      dockerfile: services/restaurant-service/Dockerfile
+    container_name: restaurant-service
+    ports:
+      - "8002:8002"     # Exposed: restaurant CRUD + menu endpoints
+    environment:
+      <<: *common-env
+      SERVICE_NAME: restaurant-service
+      DATABASE_URL: postgresql+asyncpg://delivery:delivery_secret@restaurant-db:5432/restaurant_db
+      KAFKA_CONSUMER_GROUP_ID: restaurant-service-group
+      AUTO_CONFIRM_ORDERS: "true"
+      AUTO_CONFIRM_DELAY_SECONDS: "0.5"
+    depends_on:
+      restaurant-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - delivery-net
+
+  payment-service:
+    build:
+      context: ../..
+      dockerfile: services/payment-service/Dockerfile
+    container_name: payment-service
+    ports:
+      - "8003:8003"     # Exposed: GET /v1/payments/order/{id}, POST refund
+    environment:
+      <<: *common-env
+      SERVICE_NAME: payment-service
+      DATABASE_URL: postgresql+asyncpg://delivery:delivery_secret@payment-db:5432/payment_db
+      KAFKA_CONSUMER_GROUP_ID: payment-service-group
+      SIMULATED_FAILURE_RATE: "0.1"
+      SIMULATED_PROCESSING_DELAY: "0.3"
+      MAX_TRANSACTION_AMOUNT_CENTS: "100000"
+    depends_on:
+      payment-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: on-failure
     networks:
       - delivery-net

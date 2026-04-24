@@ -1,6 +1,6 @@
 # Event-Driven Order Fulfillment Platform
 
-A production-shaped distributed backend that demonstrates real microservice domain boundaries,
+A production-shaped distributed backend demonstrating real microservice domain boundaries,
 high-throughput async event streaming, Saga orchestration with compensating transactions,
 Redis caching, Kubernetes horizontal autoscaling, and full distributed tracing via OpenTelemetry.
 
@@ -10,77 +10,92 @@ Redis caching, Kubernetes horizontal autoscaling, and full distributed tracing v
 |---|---|
 | Language | Python 3.12 |
 | Web framework | FastAPI |
-| Async event bus | Apache Kafka |
+| Async event bus | Apache Kafka (KRaft) |
 | Cache / ephemeral state | Redis |
 | Persistence | PostgreSQL 16 (one DB per service) |
 | Containerization | Docker + Docker Compose |
 | Orchestration | Kubernetes + KEDA |
 | Observability | OpenTelemetry → Prometheus / Grafana / Jaeger |
 
-## Architecture
+## Quick Start
 
-```
-Client → API Gateway → FastAPI services → PostgreSQL (per service)
-                                         → Kafka (async events)
-                                         → Redis (cache / ephemeral)
-All services → OpenTelemetry Collector → Prometheus / Grafana / Jaeger
-```
+Everything runs inside Docker — no local Python needed to try it.
 
-See [`SPEC.md`](./SPEC.md) for the full Phase 1 specification, event contracts,
-Kafka topic design, Saga flow, DLQ strategy, and Kubernetes HPA configuration.
+```bash
+# 1. Clone
+git clone https://github.com/YOUR_USERNAME/event-driven-delivery-platform.git
+cd event-driven-delivery-platform
+
+# 2. Build and start the full stack
+docker compose -f infra/docker/docker-compose.yml up --build
+
+# 3. Create Kafka topics (new terminal, while stack is running)
+./scripts/bootstrap-topics.sh
+
+# 4. Place a test order
+curl -X POST http://localhost:8001/v1/orders \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "customer_id": "11111111-1111-1111-1111-111111111111",
+    "restaurant_id": "22222222-2222-2222-2222-222222222222",
+    "items": [{"item_id": "33333333-3333-3333-3333-333333333333",
+               "name": "Margherita", "quantity": 1, "unit_price": "14.99"}],
+    "delivery_address": {"street": "123 Main St", "city": "Atlanta",
+                          "state": "GA", "zip_code": "30301"}
+  }'
+
+# 5. Watch the order state advance through the Saga
+curl http://localhost:8001/v1/orders/{order_id}/history
+```
 
 ## Services
 
-| Service | Responsibility |
-|---|---|
-| `api-gateway` | Single public entry point, routing, rate limiting |
-| `auth-service` | JWT issuance, roles, user auth |
-| `customer-service` | Customer profiles and addresses |
-| `restaurant-service` | Restaurant catalog, menus, availability |
-| `order-service` | Core order orchestration and state machine |
-| `payment-service` | Simulated payment authorization with idempotency |
-| `dispatch-service` | Driver assignment and delivery progression |
-| `notification-service` | Email/SMS/in-app notifications via events |
+| Service | Port | Responsibility |
+|---|---|---|
+| `order-service` | 8001 | Core order orchestration and state machine |
+| `restaurant-service` | 8002 | Restaurant catalog, menus, order confirmation |
+| `payment-service` | 8003 | Idempotent payment authorization |
+| `dispatch-service` | 8004 | Driver assignment and delivery *(coming soon)* |
+| `notification-service` | 8005 | Email/SMS/in-app notifications *(coming soon)* |
 
-## Order Lifecycle
+## Order Lifecycle (Saga)
 
 ```
-CREATED → PENDING_RESTAURANT_CONFIRMATION → RESTAURANT_CONFIRMED
-       → PAYMENT_PENDING → PAYMENT_AUTHORIZED → PREPARING
-       → READY_FOR_PICKUP → DRIVER_ASSIGNED → OUT_FOR_DELIVERY → DELIVERED
+POST /orders
+  → order.created
+    → restaurant.order_confirmed
+      → payment.requested
+        → payment.authorized
+          → order.preparing
+            → order.ready_for_pickup
+              → dispatch.requested
+                → driver.assigned
+                  → delivery.picked_up
+                    → delivery.completed → DELIVERED ✓
+
+Failure paths:
+  restaurant.order_rejected     → RESTAURANT_REJECTED
+  payment.failed                → PAYMENT_FAILED → CANCELLED
+  delivery.failed               → DELIVERY_FAILED → REFUNDED
 ```
 
-Failure states: `RESTAURANT_REJECTED`, `PAYMENT_FAILED`, `CANCELLED`,
-`DELIVERY_FAILED`, `REFUNDED`
+## Observability
 
-## Quick Start (local)
+| Tool | URL | What you see |
+|---|---|---|
+| Jaeger | http://localhost:16686 | Distributed traces — full request flow across services |
+| Prometheus | http://localhost:9090 | Raw metrics — latency, error rates, Kafka lag |
+| Grafana | http://localhost:3000 (admin/admin) | Dashboards |
 
-```bash
-# 1. Clone and enter repo
-git clone <repo-url>
-cd event-driven-delivery-platform
+## Architecture Principles
 
-# 2. Copy root env
-cp .env.example .env
-
-# 3. Start infra (Kafka, Postgres, Redis, OTEL Collector)
-docker compose -f infra/docker/docker-compose.yml up -d
-
-# 4. Bootstrap Kafka topics
-./scripts/bootstrap-topics.sh
-
-# 5. Start Order Service
-cd services/order-service
-cp .env.example .env
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8001
-
-# 6. Test
-curl -X POST http://localhost:8001/orders \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d @scripts/sample_order.json
-```
+- **Database per service** — no cross-service DB queries, ever
+- **Outbox pattern** — state change + event write in one DB transaction, relay publishes to Kafka
+- **Saga orchestration** — Order Service drives the workflow; compensating transactions on failure
+- **Idempotent consumers** — every event handler is safe to replay
+- **Correlation ID everywhere** — trace any order across all services and events
+- **Redis caching** — menu data and driver availability cached to reduce DB pressure
 
 ## Repo Structure
 
@@ -88,28 +103,25 @@ curl -X POST http://localhost:8001/orders \
 event-driven-delivery-platform/
 ├── docs/           Architecture docs and ADRs
 ├── infra/          Docker Compose, Kubernetes manifests, observability config
-├── libs/           Shared Python libraries (common, contracts)
-├── services/       Individual microservices
+├── libs/           Shared Python libraries (common tooling + event contracts)
+├── services/       Microservices (one folder per service)
 └── scripts/        Bootstrap and seed scripts
 ```
 
-## Observability
+## Running Tests
 
-- Distributed traces: Jaeger at `http://localhost:16686`
-- Metrics: Prometheus at `http://localhost:9090`
-- Dashboards: Grafana at `http://localhost:3000`
+```bash
+# From any service directory
+cd services/order-service
+pip install -r requirements.txt
+pytest tests/ -v
+```
 
-## Phase 1 Progress
+## Inspecting a database
 
-- [x] Architecture spec locked
-- [x] Repository skeleton
-- [ ] Local infra (Docker Compose)
-- [ ] Order Service v1
-- [ ] Restaurant Service
-- [ ] Payment Service
-- [ ] Dispatch Service
-- [ ] Notification Service
-- [ ] Redis caching layer
-- [ ] Full OpenTelemetry instrumentation
-- [ ] Kubernetes manifests + HPA + KEDA
-- [ ] Grafana dashboards + alerting
+Postgres instances have no host ports (correct design — services talk internally).
+Use docker exec to connect:
+
+```bash
+docker exec -it order-db psql -U delivery -d order_db
+```
