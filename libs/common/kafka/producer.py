@@ -49,7 +49,7 @@ class KafkaProducer:
             key_serializer=lambda k: k.encode("utf-8") if k else None,
             enable_idempotence=True,        # producer-side idempotency
             acks="all",                     # wait for all in-sync replicas
-            compression_type="lz4",
+            compression_type="gzip",
         )
         await self._producer.start()
         logger.info("Kafka producer started", bootstrap_servers=self._bootstrap_servers)
