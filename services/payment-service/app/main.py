@@ -35,7 +35,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Payment Service", environment=settings.environment)
 
     if settings.otel_traces_enabled:
-        configure_tracing(settings.service_name, settings.otel_exporter_otlp_endpoint)
+        try:
+            configure_tracing(settings.service_name, settings.otel_exporter_otlp_endpoint)
+            logger.info("OpenTelemetry tracing configured")
+        except Exception as exc:
+            # OTel collector may not be ready yet — non-fatal, service continues
+            logger.warning("OTel tracing setup failed (non-fatal)", error=str(exc))
 
     init_payment_db()
 
