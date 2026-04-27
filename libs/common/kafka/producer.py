@@ -77,6 +77,7 @@ class KafkaProducer:
             raise RuntimeError("KafkaProducer not started. Call start() first.")
 
         tracer = trace.get_tracer(__name__)
+        
         with tracer.start_as_current_span(f"kafka.publish.{event.event_type}") as span:
             span.set_attribute("messaging.system", "kafka")
             span.set_attribute("messaging.destination", topic)

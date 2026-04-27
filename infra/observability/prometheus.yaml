@@ -14,14 +14,14 @@ scrape_configs:
       - targets: ["order-service:8001"]
     metrics_path: /metrics
 
+  - job_name: "restaurant-service"
+    static_configs:
+      - targets: ["restaurant-service:8002"]
+
   - job_name: "payment-service"
     static_configs:
-      - targets: ["payment-service:8002"]
+      - targets: ["payment-service:8003"]
 
   - job_name: "dispatch-service"
     static_configs:
-      - targets: ["dispatch-service:8003"]
-
-  - job_name: "notification-service"
-    static_configs:
-      - targets: ["notification-service:8004"]
+      - targets: ["dispatch-service:8004"]
