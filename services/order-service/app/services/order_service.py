@@ -229,3 +229,6 @@ class OrderService:
         if order is None:
             raise OrderNotFoundError(f"Order {order_id} not found")
         return order
+    
+    async def get_order_history(self, order_id: uuid.UUID):
+        return await self._repo.get_order_history(order_id)

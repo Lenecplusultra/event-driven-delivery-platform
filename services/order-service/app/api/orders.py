@@ -114,19 +114,25 @@ async def get_order(
 
 @router.get(
     "/{order_id}/history",
-    response_model=OrderDetailResponse,
+    response_model=None,
     summary="Get full order status history",
 )
 async def get_order_history(
     order_id: uuid.UUID,
     service: OrderService = Depends(_get_order_service),
 ):
-    correlation_id_ctx.set(str(order_id))
-    try:
-        order = await service.get_order(order_id)
-        return order
-    except OrderNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Order {order_id} not found",
-        )
+    history = await service.get_order_history(order_id)
+    return [
+        {
+            "id": h.id,
+            "order_id": h.order_id,
+            "previous_status": h.previous_status,
+            "new_status": h.new_status,
+            "triggered_by": h.triggered_by,
+            "event_id": h.event_id,
+            "created_at": h.created_at,
+        }
+        for h in history
+    ]
+async def get_order_history(self, order_id: uuid.UUID):
+    return await self._repo.get_order_history(order_id)

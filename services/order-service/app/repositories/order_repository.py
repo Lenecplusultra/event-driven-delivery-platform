@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order import Order, OrderItem, OrderStatusHistory, Outbox
@@ -33,15 +34,27 @@ class OrderRepository:
 
     async def get_by_id(self, order_id: uuid.UUID) -> Order | None:
         result = await self._session.execute(
-            select(Order).where(Order.id == order_id)
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.id == order_id)
         )
         return result.scalar_one_or_none()
 
     async def get_by_idempotency_key(self, key: str) -> Order | None:
         result = await self._session.execute(
-            select(Order).where(Order.idempotency_key == key)
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.idempotency_key == key)
         )
         return result.scalar_one_or_none()
+
+    async def get_order_history(self, order_id: uuid.UUID) -> list[OrderStatusHistory]:
+        result = await self._session.execute(
+            select(OrderStatusHistory)
+            .where(OrderStatusHistory.order_id == order_id)
+            .order_by(OrderStatusHistory.created_at)
+        )
+        return list(result.scalars().all())
 
     # ── Writes ────────────────────────────────────────────────────────────────
 
@@ -77,6 +90,8 @@ class OrderRepository:
         self._session.add(outbox)
 
         await self._session.flush()
+        await self._session.refresh(order, attribute_names=["items"])
+
         logger.info(
             "Order persisted with outbox record",
             order_id=str(order.id),
